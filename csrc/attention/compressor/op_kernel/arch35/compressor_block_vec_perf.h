@@ -253,6 +253,7 @@ private:
     GlobalTensor<int32_t> slotMappingGm_;
     bool fusedScatter_ = false;
     uint32_t scatterBlockSize_ = 0;
+    uint32_t scatterSlotStride_ = 0;
 
     // fused scatter: slot_mapping UB prefetch buffer
     TBuf<TPosition::VECCALC> slotMappingBuf_;
@@ -312,6 +313,7 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     ropeCosGm_.SetGlobalBuffer((__gm__ X_T *)ropeCos);
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
     scatterBlockSize_ = constInfo_.scatterBlockSize;
+    scatterSlotStride_ = scatterBlockSize_ * constInfo_.headDim;
     fusedScatter_ = (slotMapping != nullptr && pagedKvCache != nullptr && scatterBlockSize_ > 0);
     if (fusedScatter_) {
         slotMappingGm_.SetGlobalBuffer((__gm__ int32_t *)slotMapping);
@@ -1536,7 +1538,7 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
         for (uint32_t i = 0; i < dealRowCount; ++i) {
             int32_t blockIdx = slotLocal.GetValue(i * 2);
             int32_t offsetInBlock = slotLocal.GetValue(i * 2 + 1);
-            uint64_t pagedOffset = ((uint64_t)blockIdx * scatterBlockSize_ + offsetInBlock) * constInfo_.headDim;
+            uint64_t pagedOffset = (uint64_t)blockIdx * scatterSlotStride_ + (uint64_t)offsetInBlock * constInfo_.headDim;
             DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
             DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[i * constInfo_.headDim], scatterParams);
         }
