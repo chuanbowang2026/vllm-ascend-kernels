@@ -977,18 +977,6 @@ class AscendDSACPImpl(DSAAttentionImpl):
             (swa_metadata,) = attn_metadata
         common_attn_metadata = attn_metadata[0]
 
-        overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
-        wait_hidden_states_local_event = (
-            torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-        )
-        with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
-            if wait_hidden_states_local_event:
-                torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
-            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
-            wait_hidden_states_allgather_event = (
-                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
-            )
-
         assert common_attn_metadata.req_metadata is not None
         assert swa_metadata.req_metadata is not None
         req_metadata = common_attn_metadata.req_metadata
@@ -1001,6 +989,29 @@ class AscendDSACPImpl(DSAAttentionImpl):
         local_seq_lengths_query = cp_metadata.local_query_start_loc
         local_seq_lengths_key = cp_metadata.local_seq_lens
         has_prefill = _has_prefill(common_attn_metadata.attn_state)
+
+        # OPT1: for pure SWA layers during prefill, do wkv on local partition
+        # first then gather the smaller KV latent (512 vs 4096), reducing
+        # all_gather comm by 7/8. Compressor layers still need full hidden_states
+        # so they keep the original gather-first path.
+        delay_kv_gather = (
+            need_gather_q_kv
+            and has_prefill
+            and self.compress_ratio <= 1
+        )
+
+        if not delay_kv_gather:
+            overlap_hidden_states_allgather = self.multistream_dsa_preprocess and need_gather_q_kv
+            wait_hidden_states_local_event = (
+                torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+            )
+            with npu_stream_switch(attention_calculation_stream(), enabled=overlap_hidden_states_allgather):
+                if wait_hidden_states_local_event:
+                    torch.npu.current_stream().wait_event(wait_hidden_states_local_event)
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states_local, need_gather_q_kv)
+                wait_hidden_states_allgather_event = (
+                    torch.npu.current_stream().record_event() if overlap_hidden_states_allgather else None
+                )
 
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and isinstance(
             self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod
@@ -1033,20 +1044,34 @@ class AscendDSACPImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        if wait_hidden_states_allgather_event:
-            torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
-
-        kv = self.wkv(hidden_states)
-        kv = self.kv_norm(kv)
         assert self.rope_head_dim is not None
-        kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            kv.unsqueeze(1),
-            cos,
-            sin,
-            rotary_mode="interleave",
-            partial_slice=[self.nope_head_dim, self.head_dim],
-        )
+        if delay_kv_gather:
+            # OPT1 path: wkv on local, gather small KV latent, then RoPE
+            kv = self.wkv(hidden_states_local)
+            kv = self.kv_norm(kv)
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            kv = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(kv, need_gather_q_kv)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
+        else:
+            # Original path: gather full HS first, then wkv
+            if wait_hidden_states_allgather_event:
+                torch.npu.current_stream().wait_event(wait_hidden_states_allgather_event)
+            kv = self.wkv(hidden_states)
+            kv = self.kv_norm(kv)
+            kv = kv.view(-1, 1, self.nope_head_dim + self.rope_head_dim)
+            torch.ops._C_ascend.inplace_partial_rotary_mul(
+                kv.unsqueeze(1),
+                cos,
+                sin,
+                rotary_mode="interleave",
+                partial_slice=[self.nope_head_dim, self.head_dim],
+            )
         torch.ops._C_ascend.npu_scatter_nd_update_v2(swa_kv_cache, swa_metadata.req_metadata.slot_mapping, kv)
 
         compress_topk_idxs = None

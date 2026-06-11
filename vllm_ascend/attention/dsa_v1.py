@@ -1576,13 +1576,12 @@ class AscendDSAImpl(DSAAttentionImpl):
         decode_tokens = attn_metadata[0].num_decode_tokens
         actual_tokens = attn_metadata[0].num_actual_tokens
 
-        # Delay allgather optimization: when prefill_comm_compute_overlap is
-        # enabled and the batch is pure-prefill, wq_a/wkv can compute on the
-        # local SP partition first, then allgather smaller intermediates.
+        # Delay allgather optimization: for pure-prefill batches, wq_a/wkv
+        # compute on the local SP partition first, then allgather smaller
+        # intermediates (512 instead of 4096), reducing comm by 7/8.
         # Mutually exclusive with multistream_dsv4_dsa_overlap (multistream wins).
         need_prefill_gather = (
-            self.prefill_comm_compute_overlap
-            and not self.multistream_dsv4_dsa_overlap
+            not self.multistream_dsv4_dsa_overlap
             and need_gather_q_kv
             and has_prefill
             and not has_decode
