@@ -2616,7 +2616,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "Tensor rope_sin, Tensor rope_cos, "
             "Tensor? state_block_table=None, Tensor? cu_seqlens=None, "
             "Tensor? seqused=None, Tensor? start_pos=None, "
-            "Tensor? slot_mapping=None, Tensor?(a!) paged_kv_cache=None, "
+            "Tensor? slot_mapping=None, Tensor(a!)? paged_kv_cache=None, "
             "int rope_head_dim=64, int cmp_ratio=4, int coff=1, "
             "float norm_eps=1e-6, int rotary_mode=1, int cache_mode=1, "
             "int block_size=0"

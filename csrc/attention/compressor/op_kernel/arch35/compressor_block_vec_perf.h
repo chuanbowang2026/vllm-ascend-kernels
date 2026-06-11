@@ -1533,7 +1533,11 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
         DataCopyExtParams slotCopyParams{1, static_cast<uint32_t>(dealRowCount * 2 * sizeof(int32_t)), 0, 0, 0};
         DataCopyPadExtParams<int32_t> slotPadParams{true, 0, 0, 0};
         DataCopyPad(slotLocal, slotMappingGm_[globalScStart * 2], slotCopyParams, slotPadParams);
-        PipeMte2ToS();
+        {
+            event_t eventIdMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+            SetFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
+            WaitFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
+        }
 
         for (uint32_t i = 0; i < dealRowCount; ++i) {
             int32_t blockIdx = slotLocal.GetValue(i * 2);
