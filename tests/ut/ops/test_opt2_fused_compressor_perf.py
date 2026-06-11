@@ -686,7 +686,11 @@ def test_dsv4_pro_fused_compressor_correctness(
     if case.scatter_dtype != DTYPE:
         pytest.skip(f"correctness test only for {DTYPE} scatter, got {case.scatter_dtype}")
 
+    _cleanup()
+
     inputs = _make_compressor_inputs(case, workload, cache_layout)
+    num_tokens = workload.seq_len * BATCH_SIZE
+    valid_rows = num_tokens // case.compress_ratio
     slot_mapping = _make_slot_mapping(inputs["expected_rows"], cache_layout)
 
     # run chain: compressor + scatter
@@ -702,9 +706,14 @@ def test_dsv4_pro_fused_compressor_correctness(
     _run_fused_compressor(case, inputs_fused, slot_mapping, cache_fused)
     torch.npu.synchronize()
 
-    # compare: only check slots that were written
+    # compare only valid compressed tokens (skip padding rows at the end)
     slot_mapping_cpu = slot_mapping.cpu()
+    verified = 0
+    skipped = 0
     for i in range(slot_mapping_cpu.shape[0]):
+        if i >= valid_rows:
+            skipped += 1
+            continue
         block_idx = int(slot_mapping_cpu[i, 0].item())
         offset = int(slot_mapping_cpu[i, 1].item())
         chain_val = cache_chain[block_idx, offset, 0, :].cpu()
@@ -714,9 +723,11 @@ def test_dsv4_pro_fused_compressor_correctness(
                 f"Mismatch at slot [{block_idx}, {offset}] (token {i}): "
                 f"chain={chain_val[:8]}..., fused={fused_val[:8]}..."
             )
+        verified += 1
 
     print(
         f"\nDSV4 {case.name} fused correctness PASSED: "
-        f"{slot_mapping_cpu.shape[0]} slots verified, "
+        f"{verified} slots verified, {skipped} padding slots skipped, "
         f"workload={workload.name}, layout={cache_layout.name}"
     )
+    _cleanup()
