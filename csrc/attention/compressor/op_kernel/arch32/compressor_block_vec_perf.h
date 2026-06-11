@@ -88,6 +88,8 @@ public:
         __gm__ uint8_t *cuSeqlens,
         __gm__ uint8_t *seqUsed,
         __gm__ uint8_t *startPos,
+        __gm__ uint8_t *slotMapping,
+        __gm__ uint8_t *pagedKvCache,
         __gm__ uint8_t *cmpKvOut);
     // =================================资源管理=================================
     __aicore__ inline void InitBuffers(TPipe *pipe);
@@ -245,6 +247,10 @@ private:
     GlobalTensor<ROPE_T> ropeSinGm_;
     GlobalTensor<ROPE_T> ropeCosGm_;
     GlobalTensor<X_T> cmpKvOutGm_;
+    GlobalTensor<X_T> pagedKvCacheGm_;
+    GlobalTensor<int32_t> slotMappingGm_;
+    bool fusedScatter_ = false;
+    uint32_t scatterBlockSize_ = 0;
 
     // ================================Local Buffer区====================================
     // TBuf<TPosition::VECIN> mm1ResUb;
@@ -290,6 +296,8 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     __gm__ uint8_t *cuSeqlens,
     __gm__ uint8_t *seqUsed,
     __gm__ uint8_t *startPos,
+    __gm__ uint8_t *slotMapping,
+    __gm__ uint8_t *pagedKvCache,
     __gm__ uint8_t *cmpKvOut)
 {
     stateBlockTableGm_.SetGlobalBuffer((__gm__ int32_t *)stateBlockTable);
@@ -299,6 +307,12 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::Init(
     ropeSinGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeSin);
     ropeCosGm_.SetGlobalBuffer((__gm__ ROPE_T *)ropeCos);
     cmpKvOutGm_.SetGlobalBuffer((__gm__ X_T *)cmpKvOut);
+    scatterBlockSize_ = constInfo_.scatterBlockSize;
+    fusedScatter_ = (slotMapping != nullptr && pagedKvCache != nullptr && scatterBlockSize_ > 0);
+    if (fusedScatter_) {
+        slotMappingGm_.SetGlobalBuffer((__gm__ int32_t *)slotMapping);
+        pagedKvCacheGm_.SetGlobalBuffer((__gm__ X_T *)pagedKvCache);
+    }
     isExistSeqUsed = (seqUsed != nullptr);
     isExistStartPos = (startPos != nullptr);
     if constexpr (COMP::xLayout == X_LAYOUT::TH) {
@@ -1468,21 +1482,39 @@ __aicore__ inline void CompressorBlockVectorPerf<COMP>::CopyFinalResultOut(const
     uint32_t curDealScSize = 0;
     if constexpr (COMP::xLayout == X_LAYOUT::TH) {
         DataCopy(cmpKvOutGm_[outOffset], cmpKvOutUb, copySize);
+        if (fusedScatter_) {
+            for (uint32_t i = 0; i < dealRowCount; ++i) {
+                uint64_t cmpTokenIdx = globalScStart + i;
+                int32_t blockIdx = slotMappingGm_.GetValue(cmpTokenIdx * 2);
+                int32_t offsetInBlock = slotMappingGm_.GetValue(cmpTokenIdx * 2 + 1);
+                uint64_t pagedOffset = ((uint64_t)blockIdx * scatterBlockSize_ + offsetInBlock) * constInfo_.headDim;
+                DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
+                DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[i * constInfo_.headDim], scatterParams);
+            }
+        }
         while (dealScSize > 0) {
             UpdateOutputIdx(OutputBStartIdx, OutputSStartIdx, dealScSize, curDealScSize);
         }
     } else {
-        // 处理BSH有效数据在内存上不连续（可能存在pad）
         uint32_t ubProcessedCount = 0;
         uint32_t preOutputBStartIdx = 0;
         uint32_t preOutputSStartIdx = 0;
         while (dealScSize > 0) {
-            // 逐batch计算写出索引
             preOutputBStartIdx = OutputBStartIdx;
             preOutputSStartIdx = OutputSStartIdx;
             UpdateOutputIdx(OutputBStartIdx, OutputSStartIdx, dealScSize, curDealScSize);
             DataCopy(cmpKvOutGm_[globalScStart * constInfo_.headDim], cmpKvOutUb[ubProcessedCount * constInfo_.headDim],
                      curDealScSize * constInfo_.headDim);
+            if (fusedScatter_) {
+                for (uint32_t i = 0; i < curDealScSize; ++i) {
+                    uint64_t cmpTokenIdx = globalScStart + i;
+                    int32_t blockIdx = slotMappingGm_.GetValue(cmpTokenIdx * 2);
+                    int32_t offsetInBlock = slotMappingGm_.GetValue(cmpTokenIdx * 2 + 1);
+                    uint64_t pagedOffset = ((uint64_t)blockIdx * scatterBlockSize_ + offsetInBlock) * constInfo_.headDim;
+                    DataCopyExtParams scatterParams{1, static_cast<uint32_t>(constInfo_.headDim * sizeof(X_T)), 0, 0, 0};
+                    DataCopyPad(pagedKvCacheGm_[pagedOffset], cmpKvOutUb[(ubProcessedCount + i) * constInfo_.headDim], scatterParams);
+                }
+            }
             CalcGlobalScStart(preOutputBStartIdx, preOutputSStartIdx, OutputBStartIdx, OutputSStartIdx, globalScStart);
             ubProcessedCount += curDealScSize;
         }

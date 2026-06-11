@@ -1188,15 +1188,9 @@ std::tuple<at::Tensor> compressor(const at::Tensor &x, const at::Tensor &wkv, co
     int64_t state_cache_stride_dim0 = state_cache.stride(0);
 
     EXEC_NPU_CMD(aclnnCompressor, x, wkv, wgate, state_cache, ape, norm_weight, rope_sin, rope_cos,
-                    state_block_table, cu_seqlens, seqused, start_pos, rope_head_dim, cmp_ratio, coff, norm_eps,
-                    rotary_mode, cache_mode, state_cache_stride_dim0, cmp_kv);
-
-    if (slot_mapping.has_value() && paged_kv_cache.has_value() && block_size > 0 && cmp_kv.numel() > 0) {
-        at::Tensor paged_cache = paged_kv_cache.value();
-        at::Tensor indices = slot_mapping.value();
-        at::IntArrayRef paged_cache_stride = paged_cache.strides();
-        EXEC_NPU_CMD(aclnnScatterNdUpdateV2, paged_cache, indices, cmp_kv, paged_cache_stride);
-    }
+                    state_block_table, cu_seqlens, seqused, start_pos, slot_mapping, paged_kv_cache,
+                    rope_head_dim, cmp_ratio, coff, norm_eps,
+                    rotary_mode, cache_mode, state_cache_stride_dim0, block_size, cmp_kv);
 
     return std::tuple<at::Tensor>(cmp_kv);
 }
