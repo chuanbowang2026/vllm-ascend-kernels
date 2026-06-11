@@ -1090,18 +1090,15 @@ class AscendDSACPImpl(DSAAttentionImpl):
                 cu_seqlens=actual_seq_lengths_query,
                 seqused=None,
                 start_pos=req_metadata.start_pos,
+                slot_mapping=compressor_attn_metadata.req_metadata.slot_mapping,
+                paged_kv_cache=compress_kv_cache,
                 rope_head_dim=self.rope_head_dim,
                 cmp_ratio=self.compress_ratio,
                 coff=coff,
                 norm_eps=self.compressor_norm_eps,
                 rotary_mode=2,
                 cache_mode=1,
-            )
-
-            if compressed_kv.numel() == 0:
-                compressed_kv = None
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(
-                compress_kv_cache, compressor_attn_metadata.req_metadata.slot_mapping, compressed_kv
+                block_size=compress_kv_cache.shape[1],
             )
 
         common_attn_kwargs = dict(
